@@ -732,6 +732,45 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
     }
 
+    /// Adds an enode to the egraph with the (Id, RecExpr) pair returned
+    pub fn add_with_recexpr_return(&mut self, enode: L) -> (Id, RecExpr<L>) {
+        let (id, recexpr) = self.add_with_recexpr_return_internal(enode);
+        (self.find(id), recexpr)
+    }
+
+    /// Adds an enode to the egraph with the (Id, RecExpr) pair returned
+    fn add_with_recexpr_return_internal(&mut self, mut enode: L) -> (Id, RecExpr<L>) {
+        let original = enode.clone();
+        let recexpr = enode.clone();
+        if let Some(existing_id) = self.lookup_internal(&mut enode) {
+            let id = self.find(existing_id);
+            // when explanations are enabled, we need a new representative for this expr
+            if let Some(explain) = self.explain.as_mut() {
+                if let Some(existing_explain) = explain.uncanon_memo.get(&original) {
+                    (*existing_explain, recexpr.join_recexprs(|id| self.id_to_expr(id)))
+                } else {
+                    let new_id = self.unionfind.make_set();
+                    explain.add(original, new_id, new_id);
+                    self.unionfind.union(id, new_id);
+                    explain.union(existing_id, new_id, Justification::Congruence, true);
+                    (new_id, recexpr.join_recexprs(|id| self.id_to_expr(id)))
+                }
+            } else {
+                (existing_id, recexpr.join_recexprs(|id| self.id_to_expr(id)))
+            }
+        } else {
+            let id = self.make_new_eclass(enode);
+            if let Some(explain) = self.explain.as_mut() {
+                explain.add(original, id, id);
+            }
+
+            // now that we updated explanations, run the analysis for the new eclass
+            N::modify(self, id);
+            self.clean = false;
+            (id, recexpr.join_recexprs(|id| self.id_to_expr(id)))
+        }
+    }
+
     /// This function makes a new eclass in the egraph (but doesn't touch explanations)
     fn make_new_eclass(&mut self, enode: L) -> Id {
         let id = self.unionfind.make_set();
