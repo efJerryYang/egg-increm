@@ -2,6 +2,7 @@ use crate::*;
 use std::{
     borrow::BorrowMut,
     fmt::{self, Debug, Display},
+    hash::Hash,
 };
 
 #[cfg(feature = "serde-1")]
@@ -900,6 +901,56 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         N::modify(self, id1);
         true
+    }
+
+    /// Clusters the given eclass into eclasses according to the result of map_enode function.
+    fn cluster_enodes_by_data(&self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data) -> HashMap<N::Data, Vec<usize>>
+        where N::Data: Eq + Hash
+    {
+        let id = self.find(id);
+        let class = self.classes.get(&id).unwrap();
+        let mut clusters: HashMap<N::Data, Vec<usize>> = HashMap::default();
+        // TODO: if possible, use enode Id instead of index
+        let mut index = 0;
+        for node in &class.nodes {
+            let key = compute_data(node);
+            clusters.entry(key).or_default().push(index);
+            index += 1;
+        }
+        clusters
+    }
+
+    /// Splits an eclass into eclasses according to the result of compute_data function.
+    pub fn split_eclass(&mut self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data)
+        where N::Data: Eq + Hash
+    {
+        let id = self.find_mut(id);
+        let clusters = self.cluster_enodes_by_data(id, &mut compute_data);
+        // Create new eclasses for each cluster and update data structures
+        let mut new_eclass_ids = Vec::new();
+        for (data, enode_ids) in clusters {
+            // find new available eclas id
+            let new_id = self.unionfind.make_set();
+            // create new eclass with enodes in the cluster <data, enode_ids>
+            let new_class = EClass {
+                id: new_id,
+                nodes: enode_ids.iter().map(|&i| self[id].nodes[i].clone()).collect(),
+                data,
+                parents: Default::default(),
+            };
+            // update parents of enodes in the new eclass
+            for enode_id in enode_ids {
+                let enode = &new_class.nodes[enode_id];
+                enode.for_each(|child| {
+                    let tup = (enode.clone(), new_id);
+                    self[child].parents.push(tup);
+                });
+            }
+            // insert new eclass into egraph
+            self.classes.insert(new_id, new_class);
+            new_eclass_ids.push(new_id); // may not be needed
+        }
+        self.clean = false; // TODO: egraph should be clean after split
     }
 
     /// Update the analysis data of an e-class.
