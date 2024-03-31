@@ -922,35 +922,71 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Splits an eclass into eclasses according to the result of compute_data function.
     pub fn split_eclass(&mut self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data)
-        where N::Data: Eq + Hash
+        where N::Data: Eq + Hash + Clone
     {
-        let id = self.find_mut(id);
-        let clusters = self.cluster_enodes_by_data(id, &mut compute_data);
+        let id: Id = self.find_mut(id);
+        let clusters: HashMap<N::Data, Vec<usize>> = self.cluster_enodes_by_data(id, &mut compute_data);
+
+        // Store the original eclass data for later use
+        let original_eclass_parents: Vec<(L, Id)> = self.classes[&id].parents.clone();
+        
         // Create new eclasses for each cluster and update data structures
-        let mut new_eclass_ids = Vec::new();
-        for (data, enode_ids) in clusters {
-            // find new available eclas id
-            let new_id = self.unionfind.make_set();
-            // create new eclass with enodes in the cluster <data, enode_ids>
-            let new_class = EClass {
+        let mut new_eclasses: Vec<(Id, EClass<L, N::Data>)> = Vec::new();
+        for (data, enode_indices) in clusters {
+            let new_id: Id = self.unionfind.make_set();
+            let new_class: EClass<L, N::Data> = EClass {
                 id: new_id,
-                nodes: enode_ids.iter().map(|&i| self[id].nodes[i].clone()).collect(),
+                nodes: enode_indices.iter().map(|&i| self.classes[&id].nodes[i].clone()).collect(),
                 data,
-                parents: Default::default(),
+                parents: Vec::new(),
             };
-            // update parents of enodes in the new eclass
-            for enode_id in enode_ids {
-                let enode = &new_class.nodes[enode_id];
-                enode.for_each(|child| {
-                    let tup = (enode.clone(), new_id);
-                    self[child].parents.push(tup);
-                });
-            }
-            // insert new eclass into egraph
-            self.classes.insert(new_id, new_class);
-            new_eclass_ids.push(new_id); // may not be needed
+            new_eclasses.push((new_id, new_class));
         }
-        self.clean = false; // TODO: egraph should be clean after split
+        
+        // Update the memo hashmap
+        for (new_id, new_class) in &new_eclasses {
+            for enode in &new_class.nodes {
+                self.memo.insert(enode.clone(), *new_id);
+            }
+        }
+        
+        // Update the classes hashmap
+        for (new_id, new_class) in new_eclasses {
+            self.classes.insert(new_id, new_class);
+        }
+        
+        // Update the classes_by_op hashmap
+        for (new_id, new_class) in &self.classes {
+            if new_id != &id {
+                for enode in &new_class.nodes {
+                    self.classes_by_op
+                        .entry(std::mem::discriminant(enode))
+                        .or_default()
+                        .insert(*new_id);
+                }
+            }
+        }
+        
+        // Update the parents of the affected eclasses
+        for (parent_enode, parent_id) in original_eclass_parents {
+            let mut new_parent_enode: L = parent_enode.clone();
+            new_parent_enode.update_children(|child_id| {
+                if child_id == id {
+                    // Find the new eclass id for the child enode
+                    let child_enode: &L = &self.classes[&child_id].nodes[0];
+                    self.memo[child_enode]
+                } else {
+                    child_id
+                }
+            });
+            self.classes.get_mut(&parent_id).unwrap().parents.push((new_parent_enode, parent_id));
+        }
+        
+        // Remove the original eclass from the egraph
+        self.classes.remove(&id);
+        self.classes_by_op.remove(&std::mem::discriminant(&self.classes[&id].nodes[0]));
+        
+        self.clean = false;
     }
 
     /// Update the analysis data of an e-class.
