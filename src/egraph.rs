@@ -904,7 +904,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     }
 
     /// Clusters the given eclass into eclasses according to the result of map_enode function.
-    fn cluster_enodes_by_data(&self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data) -> HashMap<N::Data, Vec<usize>>
+    pub fn cluster_enodes_by_data(&self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data) -> HashMap<N::Data, Vec<usize>>
         where N::Data: Eq + Hash
     {
         let id = self.find(id);
