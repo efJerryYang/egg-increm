@@ -908,7 +908,9 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         where N::Data: Eq + Hash
     {
         let id = self.find(id);
+        println!("<egg-increm::egraph::cluster_enodes_by_data> id: {:?}", id);
         let class = self.classes.get(&id).unwrap();
+        println!("<egg-increm::egraph::cluster_enodes_by_data> class: {:?}", class);
         let mut clusters: HashMap<N::Data, Vec<usize>> = HashMap::default();
         // TODO: if possible, use enode Id instead of index
         let mut index = 0;
@@ -922,11 +924,14 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Splits an eclass into eclasses according to the result of compute_data function.
     pub fn split_eclass(&mut self, id: Id, mut compute_data: impl FnMut(&L) -> N::Data)
-        where N::Data: Eq + Hash + Clone
+        where N::Data: Eq + Hash + Clone + Debug
     {
         let id: Id = self.find_mut(id);
         let clusters: HashMap<N::Data, Vec<usize>> = self.cluster_enodes_by_data(id, &mut compute_data);
-
+        // println!("<egg-increm::egraph::split_eclass> clusters: {:?}", clusters);
+        for (data, enode_indices) in &clusters {
+            println!("<egg-increm::egraph::split_eclass> <{}> data: {:?}, enode_indices: {:?}", id, data, enode_indices);
+        }
         // Store the original eclass data for later use
         let original_eclass_parents: Vec<(L, Id)> = self.classes[&id].parents.clone();
         
@@ -940,46 +945,98 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 data,
                 parents: Vec::new(),
             };
+
+            // Update the parent lists of each enode's children
+            for enode in &new_class.nodes {
+                enode.for_each(|child| {
+                    let tup = (enode.clone(), new_id);
+                    // self[child].parents.push(tup);
+                    self[child].parents.iter_mut().for_each(|parent| {
+                        if parent.1 == id {
+                            *parent = tup.clone();
+                        }
+                    });
+                });
+            }
             new_eclasses.push((new_id, new_class));
         }
+
+        // route all the reference to id to the new eclasses[0].0
+        self.unionfind.union(new_eclasses[0].0, id);
         
         // Update the memo hashmap
-        for (new_id, new_class) in &new_eclasses {
-            for enode in &new_class.nodes {
-                self.memo.insert(enode.clone(), *new_id);
-            }
-        }
+        // for (new_id, new_class) in &new_eclasses {
+        //     for enode in &new_class.nodes {
+        //         // assert!(self.memo.insert(enode.clone(), *new_id).is_none());
+        //         self.memo.insert(enode.clone(), *new_id);
+        //     }
+        // }
         
         // Update the classes hashmap
-        for (new_id, new_class) in new_eclasses {
+        for (new_id, new_class) in new_eclasses.clone() {
             self.classes.insert(new_id, new_class);
         }
         
         // Update the classes_by_op hashmap
-        for (new_id, new_class) in &self.classes {
-            if new_id != &id {
-                for enode in &new_class.nodes {
-                    self.classes_by_op
-                        .entry(std::mem::discriminant(enode))
-                        .or_default()
-                        .insert(*new_id);
-                }
-            }
-        }
+        // for (new_id, new_class) in &self.classes {
+        //     if new_id != &id {
+        //         for enode in &new_class.nodes {
+        //             self.classes_by_op
+        //                 .entry(std::mem::discriminant(enode))
+        //                 .or_default()
+        //                 .insert(*new_id);
+        //         }
+        //     }
+        // }
         
         // Update the parents of the affected eclasses
         for (parent_enode, parent_id) in original_eclass_parents {
-            let mut new_parent_enode: L = parent_enode.clone();
-            new_parent_enode.update_children(|child_id| {
-                if child_id == id {
-                    // Find the new eclass id for the child enode
-                    let child_enode: &L = &self.classes[&child_id].nodes[0];
-                    self.memo[child_enode]
-                } else {
-                    child_id
+            // TODO: fix the logic
+            // for N new classes and M ids points to the original eclass
+            // We will have N*M -1 new parent enodes to be added into the parent ecalss given by parent_id
+            // and the newly created enodes should be added to the memo hashmap, new enodes' ids are decided by `make_set()`
+            let mut new_parent_enodes: Vec<L> = vec![];
+            let mut new_ids = new_eclasses.iter().map(|(new_id, _)| *new_id).collect::<Vec<Id>>();
+            for _ in 0..new_eclasses.len() {
+                let mut new_parent_enode_vec: Vec<L> = vec![];
+                let mut new_ids_vec: Vec<Id> = vec![];
+                for child_id in parent_enode.children() {
+                    if child_id == &id {
+                        new_parent_enode_vec.push(parent_enode.clone());
+                        new_ids_vec.extend(new_ids.clone());
+                    }
                 }
+                new_parent_enodes.extend(new_parent_enode_vec);
+                new_ids.extend(new_ids_vec);
+            }
+            new_parent_enodes.iter_mut().zip(new_ids.iter()).for_each(|(new_parent_enode, new_id)| {
+                new_parent_enode.update_children(|child_id| {
+                    if child_id == id {
+                        // Find the new eclass id for the child enode
+                        let child_enode: &L = &self.classes[&child_id].nodes[0];
+                        self.memo[child_enode]
+                    } else {
+                        child_id
+                    }
+                });
             });
-            self.classes.get_mut(&parent_id).unwrap().parents.push((new_parent_enode, parent_id));
+            // if one child_id is id, replace the original one with the first new class id, create new_classes.len() - 1 new enodes
+            // and add those new enodes to the memo, the unionfind should be updated as well (make_set)
+            // 
+            // let mut child_ids: Vec<&mut Id> = vec![];
+            // for child in new_parent_enode.children_mut() {
+            //     if *child == id {
+            //         child_ids.push(child);
+            //     }
+            // }
+            // if !child_ids.is_empty() {
+            //     let mut new_enodes: Vec<L> = vec![];
+            //     for (new_id, new_class) in &new_eclasses {
+            //         let new_enode: L = new_parent_enode.clone();
+
+            //     }
+            // }
+            // self.classes.get_mut(&parent_id).unwrap().parents.push((new_parent_enode, parent_id));
         }
         
         // Remove the original eclass from the egraph
